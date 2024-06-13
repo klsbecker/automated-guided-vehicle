@@ -3,6 +3,8 @@
 #define EAST 1
 #define SOUTH 2
 #define WEST 3
+#define WHEEL_IR_THRESHOLD 500
+#define OBSTACLE_IR_THRESHOLD 500 // Should be able to detect it from a intersection
 
 // Motor 1 control pins
 const int IN1 = 11; // IN1 pin for motor 1
@@ -178,6 +180,9 @@ Node *dijkstra(int start[2], int end[2])
                 {
                     open_list[open_list_size++] = neighbor_node;
                 }
+                else{
+                    delete neighbor_node;
+                }
             }
         }
     }
@@ -261,11 +266,6 @@ void setup()
     currentDirection = getStartDirection(startChar);
     nextDirection = currentDirection;
     printPath(path);
-
-    Serial.print("First node in path: ");
-    Serial.print(path->position[0]);
-    Serial.print(", ");
-    Serial.println(path->position[1]);
     Serial.print("Starting facing direction: ");
     switch (currentDirection)
     {
@@ -286,32 +286,69 @@ void setup()
 
 void driveForward()
 {
-    digitalWrite(IN1, HIGH);
-    digitalWrite(IN2, LOW);
-    digitalWrite(IN3, HIGH);
-    digitalWrite(IN4, LOW);
+    int leftSensorValue = analogRead(IR_LEFT);
+    int rightSensorValue = analogRead(IR_RIGHT);
+
+    // If only the left sensor detects a line, turn slightly right to realign
+    if (leftSensorValue < WHEEL_IR_THRESHOLD)
+    {
+        digitalWrite(IN1, HIGH); // Keep motor 1 running
+        digitalWrite(IN2, LOW);
+        digitalWrite(IN3, LOW); // Slow down motor 2
+        digitalWrite(IN4, LOW);
+    }
+    // If only the right sensor detects a line, turn slightly left to realign
+    else if (rightSensorValue < WHEEL_IR_THRESHOLD)
+    {
+        digitalWrite(IN1, LOW); // Slow down motor 1
+        digitalWrite(IN2, LOW);
+        digitalWrite(IN3, HIGH); // Keep motor 2 running
+        digitalWrite(IN4, LOW);
+    }
+    // If neither sensor detects a line, drive straight forward
+    else
+    {
+        digitalWrite(IN1, HIGH);
+        digitalWrite(IN2, LOW);
+        digitalWrite(IN3, HIGH);
+        digitalWrite(IN4, LOW);
+    }
 }
 
-void turnLeft()
+void turnLeft(bool isAtIntersection)
 {
-    bool leftSensorEnteredLine = false;
-    bool leftSensorExitedLine = false;
+    bool rightSensorEnteredFirstLine = false;
+    bool rightSensorExitedFirstLine = false;
+    bool rightSensorEnteredSecondLine = false;
+    bool rightSensorExitedSecondLine = false;
 
-    while (!leftSensorExitedLine)
+    while (!rightSensorExitedSecondLine)
     {
-        // Read from the left sensor
-        int leftSensorValue = analogRead(IR_LEFT);
+        // Read from the right sensor
+        int rightSensorValue = analogRead(IR_RIGHT);
 
-        // Check if the left sensor has entered the line
-        if (!leftSensorEnteredLine && leftSensorValue < 500)
+        // If not at an intersection, check if the left sensor has entered the first line
+        if (isAtIntersection || !rightSensorEnteredFirstLine && rightSensorValue < WHEEL_IR_THRESHOLD)
         {
-            leftSensorEnteredLine = true;
+            rightSensorEnteredFirstLine = true;
         }
 
-        // Check if the left sensor has exited the line
-        if (leftSensorEnteredLine && !leftSensorExitedLine && leftSensorValue > 500)
+        // Check if the right sensor has exited the first line
+        if (rightSensorEnteredFirstLine && !rightSensorExitedFirstLine && rightSensorValue > WHEEL_IR_THRESHOLD)
         {
-            leftSensorExitedLine = true;
+            rightSensorExitedFirstLine = true;
+        }
+
+        // Check if the right sensor has entered the second line
+        if (rightSensorExitedFirstLine && !rightSensorEnteredSecondLine && rightSensorValue < WHEEL_IR_THRESHOLD)
+        {
+            rightSensorEnteredSecondLine = true;
+        }
+
+        // Check if the right sensor has exited the second line
+        if (rightSensorEnteredSecondLine && !rightSensorExitedSecondLine && rightSensorValue > WHEEL_IR_THRESHOLD)
+        {
+            rightSensorExitedSecondLine = true;
         }
 
         // Turn left
@@ -320,29 +357,42 @@ void turnLeft()
         digitalWrite(IN3, HIGH); // Keep motor 2 running
         digitalWrite(IN4, LOW);
     }
-    stop();
 }
 
-void turnRight()
+void turnRight(bool isAtIntersection)
 {
-    bool rightSensorEnteredLine = false;
-    bool rightSensorExitedLine = false;
+    bool leftSensorEnteredFirstLine = false;
+    bool leftSensorExitedFirstLine = false;
+    bool leftSensorEnteredSecondLine = false;
+    bool leftSensorExitedSecondLine = false;
 
-    while (!rightSensorExitedLine)
+    while (!leftSensorExitedSecondLine)
     {
-        // Read from the right sensor
-        int rightSensorValue = analogRead(IR_RIGHT);
+        // Read from the left sensor
+        int leftSensorValue = analogRead(IR_LEFT);
 
-        // Check if the right sensor has entered the line
-        if (!rightSensorEnteredLine && rightSensorValue < 500)
+        // If not at an intersection, check if the left sensor has entered the first line
+        if (isAtIntersection || !leftSensorEnteredFirstLine && leftSensorValue < WHEEL_IR_THRESHOLD)
         {
-            rightSensorEnteredLine = true;
+            leftSensorEnteredFirstLine = true;
         }
 
-        // Check if the right sensor has exited the line
-        if (rightSensorEnteredLine && !rightSensorExitedLine && rightSensorValue > 500)
+        // Check if the left sensor has exited the first line
+        if (leftSensorEnteredFirstLine && !leftSensorExitedFirstLine && leftSensorValue > WHEEL_IR_THRESHOLD)
         {
-            rightSensorExitedLine = true;
+            leftSensorExitedFirstLine = true;
+        }
+
+        // Check if the left sensor has entered the second line
+        if (leftSensorExitedFirstLine && !leftSensorEnteredSecondLine && leftSensorValue < WHEEL_IR_THRESHOLD)
+        {
+            leftSensorEnteredSecondLine = true;
+        }
+
+        // Check if the left sensor has exited the second line
+        if (leftSensorEnteredSecondLine && !leftSensorExitedSecondLine && leftSensorValue > WHEEL_IR_THRESHOLD)
+        {
+            leftSensorExitedSecondLine = true;
         }
 
         // Turn right
@@ -351,35 +401,21 @@ void turnRight()
         digitalWrite(IN3, LOW); // Stop motor 2
         digitalWrite(IN4, LOW);
     }
-    stop();
-}
-
-void turnBack()
-{
-    turnLeft();
-    currentDirection = (currentDirection + 2) % 4;
-}
-
-void stop()
-{
-    digitalWrite(IN1, LOW); // Stop motor 1
-    digitalWrite(IN2, LOW);
-    digitalWrite(IN3, LOW); // Stop motor 2
-    digitalWrite(IN4, LOW);
 }
 
 bool isThereObstacle()
 {
     int frontSensorValue = analogRead(IR_FRONT);
-    return frontSensorValue < 500;
+    return frontSensorValue < OBSTACLE_IR_THRESHOLD;
 }
 
-bool reachedIntersection()
+bool isThereIntersection()
 {
     int leftSensorValue = analogRead(IR_LEFT);
     int rightSensorValue = analogRead(IR_RIGHT);
-    return leftSensorValue < 500 && rightSensorValue < 500;
+    return leftSensorValue < WHEEL_IR_THRESHOLD && rightSensorValue < WHEEL_IR_THRESHOLD;
 }
+
 
 void updateCurrentPosition()
 {
@@ -390,55 +426,95 @@ void updateCurrentPosition()
     }
 
     // Find the second to last node and the last node
-    Node *secondToLast = path;
-    Node *last = path->parent;
+    Node *thirdToLast = path;
+    Node *secondToLast = path->parent;
+    Node *last = path->parent->parent;
     while (last->parent != NULL)
     {
+        thirdToLast = secondToLast;
         secondToLast = last;
         last = last->parent;
     }
 
-    // Remove the last node
-    delete last;
-    secondToLast->parent = NULL;
-
+    if(last != NULL){
+        delete last;
+        secondToLast->parent = NULL;
+    }
+    else{
+        delete secondToLast;
+        thirdToLast->parent = NULL;
+    }
     // Now, secondToLast is the new last node in the path
     // Determine the next direction based on the positions of the second to last node and the last node
-    int deltaX = secondToLast->position[0] - secondToLast->parent->position[0];
-    int deltaY = secondToLast->position[1] - secondToLast->parent->position[1];
+    nextDirection = getNextDirection(thirdToLast, secondToLast);
+    // Remove the last node
+    printPath(path);
+    Serial.println("Updated current position: ");
+    Serial.print(secondToLast->position[0]);
+    Serial.print(", ");
+    Serial.println(secondToLast->position[1]);
+    Serial.print("Next direction: ");
+    printDirection(nextDirection);
 
-    if (deltaX == 1)
+}
+
+int getNextDirection(Node* nextPosition, Node* currentPosition){
+    int deltaX = nextPosition->position[1] - currentPosition->position[1];
+    int deltaY = nextPosition->position[0] - currentPosition->position[0];
+
+    if (deltaX == 2)
     {
-        nextDirection = EAST;
+        return EAST;
     }
-    else if (deltaX == -1)
+    else if (deltaX == -2)
     {
-        nextDirection = WEST;
+        return WEST;
     }
-    else if (deltaY == 1)
+    else if (deltaY == 2)
     {
-        nextDirection = SOUTH;
+        return SOUTH;
     }
-    else if (deltaY == -1)
+    else if (deltaY == -2)
     {
-        nextDirection = NORTH;
+        return NORTH;
     }
 }
 
-void turnToNewDirection()
+void turnToNewDirection(bool isAtIntersection)
 {
     int directionDifference = nextDirection - currentDirection;
 
     if (directionDifference == 1 || directionDifference == -3)
     {
-        turnRight();
+        turnRight(isAtIntersection);
     }
     else if (directionDifference == -1 || directionDifference == 3)
     {
-        turnLeft();
+        turnLeft(isAtIntersection);
     }
 
     currentDirection = nextDirection;
+    Serial.print("Turned to new direction: ");
+    printDirection(currentDirection);
+}
+
+void printDirection(int direction)
+{
+    switch (direction)
+    {
+    case NORTH:
+        Serial.println("NORTH");
+        break;
+    case EAST:
+        Serial.println("EAST");
+        break;
+    case SOUTH:
+        Serial.println("SOUTH");
+        break;
+    case WEST:
+        Serial.println("WEST");
+        break;
+    }
 }
 
 void handleObstacleAndRecalculateRoute()
@@ -477,10 +553,22 @@ void handleObstacleAndRecalculateRoute()
         // Make sure to properly delete/free the old path to avoid memory leaks
         deletePath(path);
         path = newPath;
+        Serial.println("Recalculated path:");
         printPath(path);
 
         // Optionally, print the new path or take other actions as needed
     }
+    secondToLast = path;
+    last = path->parent;
+
+    {
+        secondToLast = last;
+        last = last->parent;
+    }
+
+    nextDirection = getNextDirection(secondToLast, last);
+    Serial.print("Next direction: ");
+    printDirection(nextDirection);
 }
 
 void deletePath(Node *node)
@@ -495,21 +583,29 @@ void deletePath(Node *node)
 }
 
 void loop()
-{
+{ 
 
     driveForward();
     if (isThereObstacle())
     {
-        stop();
-        turnBack();
+        Serial.println("Obstacle detected!");
         handleObstacleAndRecalculateRoute();
+        if(currentDirection != nextDirection){
+            turnToNewDirection(false);
+        }
     }
-    else if (reachedIntersection)
+    else if (isThereIntersection())
     {
         updateCurrentPosition();
-    }
-    else if (currentDirection != nextDirection)
-    {
-        turnToNewDirection();
+        if (currentDirection != nextDirection)
+        {
+            turnToNewDirection(true);
+        }
+        else{ 
+            while(isThereIntersection()){
+                driveForward();
+            }
+        }
     }
 }
+
