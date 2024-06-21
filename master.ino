@@ -1,48 +1,345 @@
-// Define the possible facing directions
-#define NORTH 0
-#define EAST 1
-#define SOUTH 2
-#define WEST 3
-#define WHEEL_IR_THRESHOLD 500
-#define OBSTACLE_IR_THRESHOLD 500 // Should be able to detect it from a intersection
+/**
+ * AGV (Automated Guided Vehicle) control system
+ * Universidade do Vale do Rio dos Sinos - UNISINOS
+ * Computer Engineering - Microprocessor Systems
+ * 
+ * Authors:
+ * - Carlos Eduardo
+ * - Klaus Becker
+*/
+#include <Arduino.h>
+#include <Thread.h>
 
-// Motor 1 control pins
-const int IN1 = 11; // IN1 pin for motor 1
-const int IN2 = 10; // IN2 pin for motor 1
+#define START_POSITION 'H'
+#define END_POSITION   '3'
 
-// Motor 2 control pins
-const int IN3 = 9; // IN1 pin for motor 2 (renamed to IN3 for clarity)
-const int IN4 = 8; // IN2 pin for motor 2 (renamed to IN4 for clarity)
+#define MOTOR_LEFT_FORWARD_PIN   6
+#define MOTOR_LEFT_BACKWARD_PIN  7
+#define MOTOR_RIGHT_FORWARD_PIN  4
+#define MOTOR_RIGHT_BACKWARD_PIN 5
 
-// Infrared sensor pins
-const int IR_LEFT = A1;  // IR sensor for the left wheel
-const int IR_RIGHT = A2; // IR sensor for the right wheel
-const int IR_FRONT = A3; // IR sensor for checking front obstacles
+#define FRONT_IR_SENSOR_PIN 9
+#define LEFT_INTERSECTION_IR_SENSOR_PIN  10
+#define RIGHT_INTERSECTION_IR_SENSOR_PIN 8
+#define LEFT_LF_IR_SENSOR_PIN 2
+#define RIGHT_LF_IR_SENSOR_PIN 3
 
-int currentDirection;
-int nextDirection;
+#define FRONT_IR_SENSOR_ACTIVE_STATE LOW
+#define LEFT_IR_SENSOR_ACTIVE_STATE  HIGH
+#define RIGHT_IR_SENSOR_ACTIVE_STATE HIGH
+
+#define GRID_LAYOUT_SIZE 11
+
+enum {
+    NORTH_DIRECTION = 0,
+    EAST_DIRECTION,
+    SOUTH_DIRECTION,
+    WEST_DIRECTION
+};
+
+enum {
+    MOTOR_STOP,
+    MOTOR_FORWARD,
+    MOTOR_BACKWARD
+};
+
+struct Node
+{
+    int position[2];
+    int g;
+    Node *parent;
+};
+
+static struct diags {
+    bool leftSensorDetected;
+    bool rightSensorDetected;
+    bool frontSensorDetected;
+    bool intersectionDetected;
+    uint8_t currentDirection;
+    uint8_t nextDirection;
+} diags;
+
 Node *path;
 
-// Define the grid dimensions
-const int rows = 11;
-const int cols = 11;
+/**
+ * Define the grid with the following characters:
+ * - ' ' for empty spaces
+ * - '|' for vertical walls
+ * - '-' for horizontal walls
+ * - '+' for intersections
+ * - [1-8] and [A-H] for initial or destination positions
+ *
+ * Grid layout:
+ *       E   F   G   H
+ *       |   |   |   |
+ *   1 - + - + - + - + - 5
+ *       |   |   |   |
+ *   2 - + - + - + - + - 6
+ *       |   |   |   |
+ *   3 - + - + - + - + - 7
+ *       |   |   |   |
+ *   4 - + - + - + - + - 8
+ *       |   |   |   |
+ *       A   B   C   D
+ */
+char grid[GRID_LAYOUT_SIZE][GRID_LAYOUT_SIZE] = {
+    {' ', ' ', 'E', ' ', 'F', ' ', 'G', ' ', 'H', ' ', ' '}, 
+    {' ', ' ', '|', ' ', '|', ' ', '|', ' ', '|', ' ', ' '}, 
+    {'1', '-', '+', '-', '+', '-', '+', '-', '+', '-', '5'}, 
+    {' ', ' ', '|', ' ', '|', ' ', '|', ' ', '|', ' ', ' '}, 
+    {'2', '-', '+', '-', '+', '-', '+', '-', '+', '-', '6'}, 
+    {' ', ' ', '|', ' ', '|', ' ', '|', ' ', '|', ' ', ' '}, 
+    {'3', '-', '+', '-', '+', '-', '+', '-', '+', '-', '7'}, 
+    {' ', ' ', '|', ' ', '|', ' ', '|', ' ', '|', ' ', ' '}, 
+    {'4', '-', '+', '-', '+', '-', '+', '-', '+', '-', '8'}, 
+    {' ', ' ', '|', ' ', '|', ' ', '|', ' ', '|', ' ', ' '}, 
+    {' ', ' ', 'A', ' ', 'B', ' ', 'C', ' ', 'D', ' ', ' '}};
 
-// Define the grid
-char grid[rows][cols] = {
-    // 0    1    2    3    4    5    6    7    8    9   10
-    {' ', ' ', 'E', ' ', 'F', ' ', 'G', ' ', 'H', ' ', ' '},  // 0
-    {' ', ' ', '|', ' ', '|', ' ', '|', ' ', '|', ' ', ' '},  // 1
-    {'1', '-', '+', '-', '+', '-', '+', '-', '+', '-', '5'},  // 2
-    {' ', ' ', '|', ' ', '|', ' ', '|', ' ', '|', ' ', ' '},  // 3
-    {'2', '-', '+', '-', '+', '-', '+', '-', '+', '-', '6'},  // 4
-    {' ', ' ', '|', ' ', '|', ' ', '|', ' ', '|', ' ', ' '},  // 5
-    {'3', '-', '+', '-', '+', '-', '+', '-', '+', '-', '7'},  // 6
-    {' ', ' ', '|', ' ', '|', ' ', '|', ' ', '|', ' ', ' '},  // 7
-    {'4', '-', '+', '-', '+', '-', '+', '-', '+', '-', '8'},  // 8
-    {' ', ' ', '|', ' ', '|', ' ', '|', ' ', '|', ' ', ' '},  // 9
-    {' ', ' ', 'A', ' ', 'B', ' ', 'C', ' ', 'D', ' ', ' '}}; // 10
+Thread diagsThread = Thread();
 
-// Function to find a character in the grid and return its coordinates
+void printDiagnosticInfo(void) {
+    Serial.println("");
+
+    Serial.print("LEFT | RIGHT | FRONT | INTERSECTION | CURRENT | NEXT\n");
+    Serial.print("-----------------------------------------------------\n");
+    Serial.print(diags.leftSensorDetected ? "  X  | " : "     | ");
+    Serial.print(diags.rightSensorDetected ? "  X   | " : "      | ");
+    Serial.print(diags.frontSensorDetected ? "  X   | " : "      | ");
+    Serial.print(diags.intersectionDetected ? "      X       | " : "              | ");
+    printDirection(diags.currentDirection);
+    Serial.print(" | ");
+    printDirection(diags.nextDirection);
+    
+    Serial.println("");
+    printPath(path);
+}
+
+int* getPositionCoordinates(char position) {
+    static int coords[2] = {-1, -1};
+    for (int i = 0; i < GRID_LAYOUT_SIZE; ++i) {
+        for (int j = 0; j < GRID_LAYOUT_SIZE; ++j) {
+            if (grid[i][j] == position) {
+                coords[0] = i;
+                coords[1] = j;
+                return coords;
+            }
+        }
+    }
+
+    return coords;
+}
+bool isLeftLineFollowerSensorDetected(void) 
+{   
+    diags.leftSensorDetected = digitalRead(LEFT_LF_IR_SENSOR_PIN) == LEFT_IR_SENSOR_ACTIVE_STATE;
+    return diags.leftSensorDetected;
+}
+
+bool isRightLineFollowerSensorDetected(void) 
+{
+    diags.rightSensorDetected = digitalRead(RIGHT_LF_IR_SENSOR_PIN) == RIGHT_IR_SENSOR_ACTIVE_STATE;
+    return diags.rightSensorDetected;
+}
+
+bool isLeftIntersectionSensorDetected(void)
+{
+    return digitalRead(LEFT_INTERSECTION_IR_SENSOR_PIN);
+}
+
+bool isRightIntersectionSensorDetected(void)
+{
+    return digitalRead(RIGHT_INTERSECTION_IR_SENSOR_PIN);
+}
+
+bool isFrontSensorDetected(void) 
+{
+    diags.frontSensorDetected = digitalRead(FRONT_IR_SENSOR_PIN) == FRONT_IR_SENSOR_ACTIVE_STATE;
+    return diags.frontSensorDetected;
+}
+
+bool isValidMove(int currentPos[2], int nextPos[2]) {
+    int currentRow = currentPos[0];
+    int currentCol = currentPos[1];
+    int nextRow = nextPos[0];
+    int nextCol = nextPos[1];
+
+    // Check if next position is out of bounds
+    if (nextRow < 0 || nextRow >= GRID_LAYOUT_SIZE || nextCol < 0 || nextCol >= GRID_LAYOUT_SIZE) {
+        return false;
+    }
+
+    // Check if next position is an obstacle or empty space
+    if (grid[nextRow][nextCol] == ' ' || grid[nextRow][nextCol] == 'x') {
+        return false;
+    }
+
+    // Check for horizontal move
+    if (currentRow == nextRow) {
+        if (abs(nextCol - currentCol) == 2 && grid[currentRow][(currentCol + nextCol) / 2] != '-') {
+            return false;
+        }
+    }
+    // Check for vertical move
+    else if (currentCol == nextCol) {
+        if (abs(nextRow - currentRow) == 2 && grid[(currentRow + nextRow) / 2][currentCol] != '|') {
+            return false;
+        }
+    }
+    // If the move is not purely horizontal or vertical
+    else {
+        return false;
+    }
+
+    return true;
+}
+
+
+Node *dijkstra(int start[2], int end[2])
+{
+    Node *start_node = new Node;
+    start_node->position[0] = start[0];
+    start_node->position[1] = start[1];
+    start_node->g = 0;
+    start_node->parent = NULL;
+
+    Node *open_list[GRID_LAYOUT_SIZE * GRID_LAYOUT_SIZE];
+    int open_list_size = 0;
+    open_list[open_list_size++] = start_node;
+
+    bool closed_list[GRID_LAYOUT_SIZE][GRID_LAYOUT_SIZE] = {false};
+
+    while (open_list_size > 0)
+    {
+        Node *current_node = open_list[0];
+        int current_index = 0;
+
+        for (int i = 1; i < open_list_size; i++)
+        {
+            if (open_list[i]->g < current_node->g) {
+                current_node = open_list[i];
+                current_index = i;
+            }
+        }
+
+        open_list_size--;
+        for (int i = current_index; i < open_list_size; i++)
+        {
+            open_list[i] = open_list[i + 1];
+        }
+
+        closed_list[current_node->position[0]][current_node->position[1]] = true;
+
+        if (current_node->position[0] == end[0] && current_node->position[1] == end[1]) {
+            return current_node;
+        }
+
+        int neighbors[4][2] = {
+            {0, 2},  // Move right:  No change in the row, move two columns to the right
+            {2, 0},  // Move down:   Move two rows down, no change in the column
+            {0, -2}, // Move left:   No change in the row, move two columns to the left
+            {-2, 0}  // Move up:     Move two rows up, no change in the column
+        };
+
+        for (int i = 0; i < 4; i++)
+        {
+            int neighbor_pos[2] = {current_node->position[0] + neighbors[i][0], current_node->position[1] + neighbors[i][1]};
+
+            if (isValidMove(current_node->position, neighbor_pos) && !closed_list[neighbor_pos[0]][neighbor_pos[1]]) {
+                Node *neighbor_node = new Node;
+                neighbor_node->position[0] = neighbor_pos[0];
+                neighbor_node->position[1] = neighbor_pos[1];
+                neighbor_node->g = current_node->g + 1;
+                neighbor_node->parent = current_node;
+
+                bool skip = false;
+                for (int j = 0; j < open_list_size; j++)
+                {
+                    if (open_list[j]->position[0] == neighbor_node->position[0] && open_list[j]->position[1] == neighbor_node->position[1] && open_list[j]->g <= neighbor_node->g) {
+                        skip = true;
+                        break;
+                    }
+                }
+
+                if (!skip) {
+                    open_list[open_list_size++] = neighbor_node;
+                } else {
+                    delete neighbor_node;
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
+int getStartDirection(char startChar)
+{
+    if (startChar >= 'E' && startChar <= 'H') {
+        Serial.println("SOUTH");
+        return SOUTH_DIRECTION;
+    } else if (startChar >= '1' && startChar <= '4') {
+        Serial.println("EAST");
+        return EAST_DIRECTION;
+    } else if (startChar >= '5' && startChar <= '8') {
+        Serial.println("WEST");
+        return WEST_DIRECTION;
+    } else if (startChar >= 'A' && startChar <= 'D') {
+        Serial.println("NORTH");
+        return NORTH_DIRECTION;
+    }
+}
+
+void printPath(struct Node *path)
+{
+    // Create a temporary copy of the grid for display purposes
+    char tempGrid[GRID_LAYOUT_SIZE][GRID_LAYOUT_SIZE];
+    for (int i = 0; i < GRID_LAYOUT_SIZE; i++)
+    {
+        for (int j = 0; j < GRID_LAYOUT_SIZE; j++)
+        {
+            tempGrid[i][j] = grid[i][j];
+        }
+    }
+
+    // Mark the path on the temporary grid
+    Node *node = path;
+    while (node != NULL)
+    {
+        tempGrid[node->position[0]][node->position[1]] = 'P';
+        node = node->parent;
+    }
+
+    // Print the temporary grid with the path marked
+    for (int i = 0; i < GRID_LAYOUT_SIZE; i++)
+    {
+        for (int j = 0; j < GRID_LAYOUT_SIZE; j++)
+        {
+            Serial.print(tempGrid[i][j]);
+        }
+        Serial.println();
+    }
+}
+
+void setup()
+{
+    Serial.begin(115200);
+
+    pinMode(MOTOR_LEFT_FORWARD_PIN, OUTPUT);
+    pinMode(MOTOR_LEFT_BACKWARD_PIN, OUTPUT);
+    pinMode(MOTOR_RIGHT_FORWARD_PIN, OUTPUT);
+    pinMode(MOTOR_RIGHT_BACKWARD_PIN, OUTPUT);
+
+    int startX, startY, endX, endY;
+    parseInput(START_POSITION, END_POSITION, startX, startY, endX, endY);
+
+    path = dijkstra(new int[2]{startX, startY}, new int[2]{endX, endY});
+    // path = dijkstra(getPositionCoordinates(START_POSITION), getPositionCoordinates(END_POSITION));
+
+    diags.currentDirection = getStartDirection(START_POSITION);
+    diags.nextDirection = diags.currentDirection;
+
+    diagsThread.onRun(printDiagnosticInfo);
+    diagsThread.setInterval(200);
+}
+
 void findCharInGrid(char c, int &x, int &y)
 {
     for (int i = 0; i < 11; i++)
@@ -59,265 +356,72 @@ void findCharInGrid(char c, int &x, int &y)
     }
 }
 
-struct Node
-{
-    int position[2];
-    int g;
-    Node *parent;
-};
-
-bool is_valid_move(int current_pos[2], int next_pos[2])
-{
-    int row = current_pos[0];
-    int col = current_pos[1];
-    int next_row = next_pos[0];
-    int next_col = next_pos[1];
-
-    if (next_row < 0 || next_row >= rows || next_col < 0 || next_col >= cols)
-    {
-        return false;
-    }
-
-    if (grid[next_row][next_col] == ' ' || grid[next_row][next_col] == 'x')
-    { // Consider 'x' as obstacle
-        return false;
-    }
-
-    if (row == next_row)
-    { // Horizontal move
-        if (next_col - col == 2 && grid[row][col + 1] != '-')
-        {
-            return false;
-        }
-        else if (next_col - col == -2 && grid[row][col - 1] != '-')
-        {
-            return false;
-        }
-    }
-    else if (col == next_col)
-    { // Vertical move
-        if (next_row - row == 2 && grid[row + 1][col] != '|')
-        {
-            return false;
-        }
-        else if (next_row - row == -2 && grid[row - 1][col] != '|')
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
-
-Node *dijkstra(int start[2], int end[2])
-{
-    Node *start_node = new Node;
-    start_node->position[0] = start[0];
-    start_node->position[1] = start[1];
-    start_node->g = 0;
-    start_node->parent = NULL;
-
-    Node *open_list[rows * cols];
-    int open_list_size = 0;
-    open_list[open_list_size++] = start_node;
-
-    bool closed_list[rows][cols] = {false};
-
-    while (open_list_size > 0)
-    {
-        Node *current_node = open_list[0];
-        int current_index = 0;
-
-        for (int i = 1; i < open_list_size; i++)
-        {
-            if (open_list[i]->g < current_node->g)
-            {
-                current_node = open_list[i];
-                current_index = i;
-            }
-        }
-
-        open_list_size--;
-        for (int i = current_index; i < open_list_size; i++)
-        {
-            open_list[i] = open_list[i + 1];
-        }
-
-        closed_list[current_node->position[0]][current_node->position[1]] = true;
-
-        if (current_node->position[0] == end[0] && current_node->position[1] == end[1])
-        {
-            return current_node;
-        }
-
-        int neighbors[4][2] = {
-            {0, 2}, {2, 0}, {0, -2}, {-2, 0} // Possible moves: right, down, left, up
-        };
-
-        for (int i = 0; i < 4; i++)
-        {
-            int neighbor_pos[2] = {current_node->position[0] + neighbors[i][0], current_node->position[1] + neighbors[i][1]};
-
-            if (is_valid_move(current_node->position, neighbor_pos) && !closed_list[neighbor_pos[0]][neighbor_pos[1]])
-            {
-                Node *neighbor_node = new Node;
-                neighbor_node->position[0] = neighbor_pos[0];
-                neighbor_node->position[1] = neighbor_pos[1];
-                neighbor_node->g = current_node->g + 1;
-                neighbor_node->parent = current_node;
-
-                bool skip = false;
-                for (int j = 0; j < open_list_size; j++)
-                {
-                    if (open_list[j]->position[0] == neighbor_node->position[0] && open_list[j]->position[1] == neighbor_node->position[1] && open_list[j]->g <= neighbor_node->g)
-                    {
-                        skip = true;
-                        break;
-                    }
-                }
-
-                if (!skip)
-                {
-                    open_list[open_list_size++] = neighbor_node;
-                }
-                else{
-                    delete neighbor_node;
-                }
-            }
-        }
-    }
-    return NULL;
-}
-
-// Function to parse the input and find the start and end coordinates
 void parseInput(char startChar, char endChar, int &startX, int &startY, int &endX, int &endY)
 {
     findCharInGrid(startChar, startX, startY);
     findCharInGrid(endChar, endX, endY);
 }
 
-int getStartDirection(char startChar)
+
+
+void drive(uint8_t motorLeft, uint8_t motorRight)
 {
-    if (startChar >= 'E' && startChar <= 'H')
-    {
-        return SOUTH;
-    }
-    else if (startChar >= '1' && startChar <= '4')
-    {
-        return EAST;
-    }
-    else if (startChar >= '5' && startChar <= '8')
-    {
-        return WEST;
-    }
-    else if (startChar >= 'A' && startChar <= 'D')
-    {
-        return NORTH;
-    }
-}
-
-void printPath(struct Node *path)
-{
-    // Create a temporary copy of the grid for display purposes
-    char tempGrid[rows][cols];
-    for (int i = 0; i < rows; i++)
-    {
-        for (int j = 0; j < cols; j++)
-        {
-            tempGrid[i][j] = grid[i][j];
-        }
+    switch (motorLeft) {
+        case MOTOR_STOP:
+            digitalWrite(MOTOR_LEFT_FORWARD_PIN,  LOW);
+            digitalWrite(MOTOR_LEFT_BACKWARD_PIN, LOW);
+            break;
+        case MOTOR_FORWARD:
+            digitalWrite(MOTOR_LEFT_FORWARD_PIN,  HIGH);
+            digitalWrite(MOTOR_LEFT_BACKWARD_PIN, LOW);
+            break;
+        case MOTOR_BACKWARD:
+            digitalWrite(MOTOR_LEFT_FORWARD_PIN,  LOW);
+            digitalWrite(MOTOR_LEFT_BACKWARD_PIN, HIGH);
+            break;
     }
 
-    // Mark the path on the temporary grid
-    Node *node = path;
-    while (node != NULL)
-    {
-        tempGrid[node->position[0]][node->position[1]] = 'P';
-        node = node->parent;
-    }
-
-    // Print the temporary grid with the path marked
-    for (int i = 0; i < rows; i++)
-    {
-        for (int j = 0; j < cols; j++)
-        {
-            Serial.print(tempGrid[i][j]);
-        }
-        Serial.println();
-    }
-}
-
-void setup()
-{
-    Serial.begin(9600);
-    // Motor control pin modes
-    pinMode(IN1, OUTPUT);
-    pinMode(IN2, OUTPUT);
-    pinMode(IN3, OUTPUT);
-    pinMode(IN4, OUTPUT);
-
-    // Example usage with dynamic obstacles
-    char startChar = 'A';
-    char endChar = 'H';
-    int startX, startY, endX, endY;
-    parseInput(startChar, endChar, startX, startY, endX, endY);
-
-    path = dijkstra(new int[2]{startX, startY}, new int[2]{endX, endY});
-    currentDirection = getStartDirection(startChar);
-    nextDirection = currentDirection;
-    printPath(path);
-    Serial.print("Starting facing direction: ");
-    switch (currentDirection)
-    {
-    case NORTH:
-        Serial.println("NORTH");
-        break;
-    case EAST:
-        Serial.println("EAST");
-        break;
-    case SOUTH:
-        Serial.println("SOUTH");
-        break;
-    case WEST:
-        Serial.println("WEST");
-        break;
+    switch (motorRight) {
+        case MOTOR_STOP:
+            digitalWrite(MOTOR_RIGHT_FORWARD_PIN,  LOW);
+            digitalWrite(MOTOR_RIGHT_BACKWARD_PIN, LOW);
+            break;
+        case MOTOR_FORWARD:
+            digitalWrite(MOTOR_RIGHT_FORWARD_PIN,  HIGH);
+            digitalWrite(MOTOR_RIGHT_BACKWARD_PIN, LOW);
+            break;
+        case MOTOR_BACKWARD:
+            digitalWrite(MOTOR_RIGHT_FORWARD_PIN,  LOW);
+            digitalWrite(MOTOR_RIGHT_BACKWARD_PIN, HIGH);
+            break;
     }
 }
 
 void driveForward()
 {
-    int leftSensorValue = analogRead(IR_LEFT);
-    int rightSensorValue = analogRead(IR_RIGHT);
+    bool leftMotorRead = isLeftLineFollowerSensorDetected();
+    bool rightMotorRead = isRightLineFollowerSensorDetected();
+    
 
-    // If only the left sensor detects a line, turn slightly right to realign
-    if (leftSensorValue < WHEEL_IR_THRESHOLD)
-    {
-        digitalWrite(IN1, HIGH); // Keep motor 1 running
-        digitalWrite(IN2, LOW);
-        digitalWrite(IN3, LOW); // Slow down motor 2
-        digitalWrite(IN4, LOW);
+    if (leftMotorRead && rightMotorRead || !leftMotorRead && !rightMotorRead){
+        drive(MOTOR_FORWARD, MOTOR_FORWARD);
+        return;
+    } else if (leftMotorRead) {
+        drive(MOTOR_FORWARD, MOTOR_STOP);
+        return;
+    } else if (rightMotorRead) {
+        drive(MOTOR_STOP, MOTOR_FORWARD);
+        return;
     }
-    // If only the right sensor detects a line, turn slightly left to realign
-    else if (rightSensorValue < WHEEL_IR_THRESHOLD)
-    {
-        digitalWrite(IN1, LOW); // Slow down motor 1
-        digitalWrite(IN2, LOW);
-        digitalWrite(IN3, HIGH); // Keep motor 2 running
-        digitalWrite(IN4, LOW);
-    }
-    // If neither sensor detects a line, drive straight forward
-    else
-    {
-        digitalWrite(IN1, HIGH);
-        digitalWrite(IN2, LOW);
-        digitalWrite(IN3, HIGH);
-        digitalWrite(IN4, LOW);
-    }
+    // digitalWrite(MOTOR_LEFT_FORWARD_PIN,  !leftMotorRead);
+    // digitalWrite(MOTOR_LEFT_BACKWARD_PIN, leftMotorRead);
+    // digitalWrite(MOTOR_RIGHT_FORWARD_PIN,  !rightMotorRead);
+    // digitalWrite(MOTOR_RIGHT_BACKWARD_PIN, rightMotorRead);
 }
 
-void turnLeft(bool isAtIntersection)
+
+void turnLeft(bool isForwarding = true)
 {
-    bool rightSensorEnteredFirstLine = false;
     bool rightSensorExitedFirstLine = false;
     bool rightSensorEnteredSecondLine = false;
     bool rightSensorExitedSecondLine = false;
@@ -325,43 +429,34 @@ void turnLeft(bool isAtIntersection)
     while (!rightSensorExitedSecondLine)
     {
         // Read from the right sensor
-        int rightSensorValue = analogRead(IR_RIGHT);
-
-        // If not at an intersection, check if the left sensor has entered the first line
-        if (isAtIntersection || !rightSensorEnteredFirstLine && rightSensorValue < WHEEL_IR_THRESHOLD)
-        {
-            rightSensorEnteredFirstLine = true;
-        }
+        int rightSensorValue = isRightIntersectionSensorDetected();
 
         // Check if the right sensor has exited the first line
-        if (rightSensorEnteredFirstLine && !rightSensorExitedFirstLine && rightSensorValue > WHEEL_IR_THRESHOLD)
-        {
+        if (!rightSensorExitedFirstLine && !rightSensorValue) {
             rightSensorExitedFirstLine = true;
         }
 
         // Check if the right sensor has entered the second line
-        if (rightSensorExitedFirstLine && !rightSensorEnteredSecondLine && rightSensorValue < WHEEL_IR_THRESHOLD)
-        {
+        if (rightSensorExitedFirstLine && !rightSensorEnteredSecondLine && rightSensorValue) {
             rightSensorEnteredSecondLine = true;
         }
 
         // Check if the right sensor has exited the second line
-        if (rightSensorEnteredSecondLine && !rightSensorExitedSecondLine && rightSensorValue > WHEEL_IR_THRESHOLD)
-        {
+        if (rightSensorEnteredSecondLine && !rightSensorExitedSecondLine && !rightSensorValue) {
             rightSensorExitedSecondLine = true;
         }
 
-        // Turn left
-        digitalWrite(IN1, LOW); // Stop motor 1
-        digitalWrite(IN2, LOW);
-        digitalWrite(IN3, HIGH); // Keep motor 2 running
-        digitalWrite(IN4, LOW);
+        // Turn AGV left
+        if (isForwarding) {
+            drive(MOTOR_FORWARD, MOTOR_BACKWARD);
+        } else {
+            drive(MOTOR_FORWARD, MOTOR_STOP);
+        }
     }
 }
 
-void turnRight(bool isAtIntersection)
+void turnRight(bool isForwarding = true)
 {
-    bool leftSensorEnteredFirstLine = false;
     bool leftSensorExitedFirstLine = false;
     bool leftSensorEnteredSecondLine = false;
     bool leftSensorExitedSecondLine = false;
@@ -369,59 +464,41 @@ void turnRight(bool isAtIntersection)
     while (!leftSensorExitedSecondLine)
     {
         // Read from the left sensor
-        int leftSensorValue = analogRead(IR_LEFT);
-
-        // If not at an intersection, check if the left sensor has entered the first line
-        if (isAtIntersection || !leftSensorEnteredFirstLine && leftSensorValue < WHEEL_IR_THRESHOLD)
-        {
-            leftSensorEnteredFirstLine = true;
-        }
+        int leftSensorValue = isLeftIntersectionSensorDetected();
 
         // Check if the left sensor has exited the first line
-        if (leftSensorEnteredFirstLine && !leftSensorExitedFirstLine && leftSensorValue > WHEEL_IR_THRESHOLD)
-        {
+        if (!leftSensorExitedFirstLine && !leftSensorValue) {
             leftSensorExitedFirstLine = true;
         }
 
         // Check if the left sensor has entered the second line
-        if (leftSensorExitedFirstLine && !leftSensorEnteredSecondLine && leftSensorValue < WHEEL_IR_THRESHOLD)
-        {
+        if (leftSensorExitedFirstLine && !leftSensorEnteredSecondLine && leftSensorValue) {
             leftSensorEnteredSecondLine = true;
         }
 
         // Check if the left sensor has exited the second line
-        if (leftSensorEnteredSecondLine && !leftSensorExitedSecondLine && leftSensorValue > WHEEL_IR_THRESHOLD)
-        {
+        if (leftSensorEnteredSecondLine && !leftSensorExitedSecondLine && !leftSensorValue) {
             leftSensorExitedSecondLine = true;
         }
 
-        // Turn right
-        digitalWrite(IN1, HIGH); // Keep motor 1 running
-        digitalWrite(IN2, LOW);
-        digitalWrite(IN3, LOW); // Stop motor 2
-        digitalWrite(IN4, LOW);
+        // Turn AGV right
+        if (isForwarding) {
+            drive(MOTOR_BACKWARD, MOTOR_FORWARD);
+        } else {
+            drive(MOTOR_STOP, MOTOR_BACKWARD);
+        }
     }
-}
-
-bool isThereObstacle()
-{
-    int frontSensorValue = analogRead(IR_FRONT);
-    return frontSensorValue < OBSTACLE_IR_THRESHOLD;
 }
 
 bool isThereIntersection()
 {
-    int leftSensorValue = analogRead(IR_LEFT);
-    int rightSensorValue = analogRead(IR_RIGHT);
-    return leftSensorValue < WHEEL_IR_THRESHOLD && rightSensorValue < WHEEL_IR_THRESHOLD;
+    diags.intersectionDetected = isLeftIntersectionSensorDetected() && isRightIntersectionSensorDetected();
+    return diags.intersectionDetected;
 }
-
 
 void updateCurrentPosition()
 {
-    if (path == NULL || path->parent == NULL)
-    {
-        // If path is empty or only has one node, we cannot update the position.
+    if (path == NULL || path->parent == NULL) {
         return;
     }
 
@@ -436,25 +513,23 @@ void updateCurrentPosition()
         last = last->parent;
     }
 
-    if(last != NULL){
+    if(last != NULL) {
         delete last;
         secondToLast->parent = NULL;
-    }
-    else{
+    } else {
         delete secondToLast;
         thirdToLast->parent = NULL;
     }
-    // Now, secondToLast is the new last node in the path
-    // Determine the next direction based on the positions of the second to last node and the last node
-    nextDirection = getNextDirection(thirdToLast, secondToLast);
-    // Remove the last node
+
+    diags.nextDirection = getNextDirection(thirdToLast, secondToLast);
+
     printPath(path);
     Serial.println("Updated current position: ");
     Serial.print(secondToLast->position[0]);
     Serial.print(", ");
     Serial.println(secondToLast->position[1]);
     Serial.print("Next direction: ");
-    printDirection(nextDirection);
+    printDirection(diags.nextDirection);
 
 }
 
@@ -462,65 +537,54 @@ int getNextDirection(Node* nextPosition, Node* currentPosition){
     int deltaX = nextPosition->position[1] - currentPosition->position[1];
     int deltaY = nextPosition->position[0] - currentPosition->position[0];
 
-    if (deltaX == 2)
-    {
-        return EAST;
-    }
-    else if (deltaX == -2)
-    {
-        return WEST;
-    }
-    else if (deltaY == 2)
-    {
-        return SOUTH;
-    }
-    else if (deltaY == -2)
-    {
-        return NORTH;
+    if (deltaX == 2) {
+        return EAST_DIRECTION;
+    } else if (deltaX == -2) {
+        return WEST_DIRECTION;
+    } else if (deltaY == 2) {
+        return SOUTH_DIRECTION;
+    } else if (deltaY == -2) {
+        return NORTH_DIRECTION;
     }
 }
 
-void turnToNewDirection(bool isAtIntersection)
+void turnToNewDirection(bool isForwarding = true)
 {
-    int directionDifference = nextDirection - currentDirection;
+    int directionDifference = diags.nextDirection - diags.currentDirection;
 
-    if (directionDifference == 1 || directionDifference == -3)
-    {
-        turnRight(isAtIntersection);
-    }
-    else if (directionDifference == -1 || directionDifference == 3)
-    {
-        turnLeft(isAtIntersection);
+    if (directionDifference == 1 || directionDifference == -3) {
+        turnRight(isForwarding);
+    } else if (directionDifference == -1 || directionDifference == 3) {
+        turnLeft(isForwarding);
     }
 
-    currentDirection = nextDirection;
+    diags.currentDirection = diags.nextDirection;
     Serial.print("Turned to new direction: ");
-    printDirection(currentDirection);
+    printDirection(diags.currentDirection);
 }
 
 void printDirection(int direction)
 {
     switch (direction)
     {
-    case NORTH:
-        Serial.println("NORTH");
+    case NORTH_DIRECTION:
+        Serial.print("NORTH");
         break;
-    case EAST:
-        Serial.println("EAST");
+    case EAST_DIRECTION:
+        Serial.print("EAST");
         break;
-    case SOUTH:
-        Serial.println("SOUTH");
+    case SOUTH_DIRECTION:
+        Serial.print("SOUTH");
         break;
-    case WEST:
-        Serial.println("WEST");
+    case WEST_DIRECTION:
+        Serial.print("WEST");
         break;
     }
 }
 
 void handleObstacleAndRecalculateRoute()
 {
-    if (path == NULL || path->parent == NULL)
-    {
+    if (path == NULL || path->parent == NULL) {
         // Path is too short, cannot handle obstacle
         return;
     }
@@ -538,15 +602,14 @@ void handleObstacleAndRecalculateRoute()
     int obstacleY = (last->position[1] + secondToLast->position[1]) / 2;
 
     // Check if the position is valid for an obstacle ('-' or '|')
-    if (grid[obstacleX][obstacleY] == '-' || grid[obstacleX][obstacleY] == '|')
-    {
+    if (grid[obstacleX][obstacleY] == '-' || grid[obstacleX][obstacleY] == '|') {
         // Mark the position as an obstacle
         grid[obstacleX][obstacleY] = 'x';
 
         // Recalculate the route from the current position to the destination
         int start[2] = {last->position[0], last->position[1]};
         int end[2] = {path->position[0], path->position[1]};
-        // You might need to implement a way to retrieve or store the end position
+
         Node *newPath = dijkstra(start, end);
 
         // Update the path with the new route
@@ -556,7 +619,6 @@ void handleObstacleAndRecalculateRoute()
         Serial.println("Recalculated path:");
         printPath(path);
 
-        // Optionally, print the new path or take other actions as needed
     }
     secondToLast = path;
     last = path->parent;
@@ -566,15 +628,14 @@ void handleObstacleAndRecalculateRoute()
         last = last->parent;
     }
 
-    nextDirection = getNextDirection(secondToLast, last);
+    diags.nextDirection = getNextDirection(secondToLast, last);
     Serial.print("Next direction: ");
-    printDirection(nextDirection);
+    printDirection(diags.nextDirection);
 }
 
 void deletePath(Node *node)
 {
-    if (node == NULL)
-    {
+    if (node == NULL) {
         return;
     }
 
@@ -582,28 +643,54 @@ void deletePath(Node *node)
     delete node;
 }
 
+void driveBackward()
+{
+    bool leftMotorRead = isLeftLineFollowerSensorDetected();
+    bool rightMotorRead = isRightLineFollowerSensorDetected();
+    
+
+    if (leftMotorRead && rightMotorRead || !leftMotorRead && !rightMotorRead){
+        drive(MOTOR_BACKWARD, MOTOR_BACKWARD);
+        return;
+    } else if (leftMotorRead) {
+        drive(MOTOR_STOP, MOTOR_BACKWARD);
+        return;
+    } else if (rightMotorRead) {
+        drive(MOTOR_BACKWARD, MOTOR_STOP);
+        return;
+    }
+}
+
+void goBackToIntersection() {
+    while (!isThereIntersection()) {
+        driveBackward();
+    }
+}
+
 void loop()
-{ 
+{
+    if(diagsThread.shouldRun()){
+        diagsThread.run();
+    }
 
     driveForward();
-    if (isThereObstacle())
-    {
+    if (isFrontSensorDetected()) {
         Serial.println("Obstacle detected!");
+        goBackToIntersection();
         handleObstacleAndRecalculateRoute();
-        if(currentDirection != nextDirection){
+        if(diags.currentDirection != diags.nextDirection){
             turnToNewDirection(false);
         }
-    }
-    else if (isThereIntersection())
-    {
+    } else if (isThereIntersection()) {
         updateCurrentPosition();
-        if (currentDirection != nextDirection)
-        {
+        if (diags.currentDirection != diags.nextDirection) {
             turnToNewDirection(true);
-        }
-        else{ 
+        } else { 
             while(isThereIntersection()){
-                driveForward();
+                if(diagsThread.shouldRun()){
+                    diagsThread.run();
+                }
+                drive(MOTOR_FORWARD, MOTOR_FORWARD);
             }
         }
     }
